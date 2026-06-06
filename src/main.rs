@@ -442,7 +442,8 @@ fn exec_decode(da: &DecodeArgs, dump_json: bool) -> Result<(), String> {
     let types = types_result?;
     let data = get_input_bytes(da)?;
     let results = decode_fields(&types, &data)?;
-    let out = format_decode_output(&results, &da.output, &da.delimiter)?;
+    let delimiter = da.delimiter.replace("\\n", "\n").replace("\\t", "\t").replace("\\0", "\0");
+    let out = format_decode_output(&results, &da.output, &delimiter)?;
     println!("{out}");
     Ok(())
 }
