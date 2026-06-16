@@ -1,8 +1,9 @@
 use argh::FromArgs;
+use serde_json::Value;
 use std::io::{self, Read, Write};
 use struct_cli::{
     config::{self, Config},
-    decode::{decode_fields, DecodeResult},
+    decode::decode_fields,
     encode::{encode_fields, parse_hex},
     types::{parse_type, parse_type_list, FieldType},
 };
@@ -33,11 +34,11 @@ enum SubCommand {
 #[argh(subcommand, name = "decode")]
 /// Decode binary data into typed fields.
 struct DecodeArgs {
-    /// struct definition: comma-separated types (e.g. u8,>u16,s8)
+    /// struct definition: comma-separated types (e.g. u8,>u16,s8 or u8,[i8,i8])
     #[argh(option, short = 't')]
     types: Option<String>,
 
-    /// struct definition as JSON array (e.g. '["u8",">u16","s8"]')
+    /// struct definition as JSON array (e.g. '["u8",["i8","i8"]]')
     #[argh(option)]
     types_json: Option<String>,
 
@@ -78,7 +79,7 @@ struct EncodeArgs {
     #[argh(option, short = 'v')]
     values: Option<String>,
 
-    /// values as JSON array of strings
+    /// values as JSON array (typed: numbers, booleans, nested arrays for groups)
     #[argh(option)]
     values_json: Option<String>,
 
@@ -187,7 +188,7 @@ fn parse_types_from_args(
     types_json: Option<&String>,
 ) -> Result<Vec<FieldType>, String> {
     if let Some(tj) = types_json {
-        let v: serde_json::Value =
+        let v: Value =
             serde_json::from_str(tj).map_err(|e| format!("invalid types JSON: {e}"))?;
         config::parse_json_types(&v)
     } else if let Some(ts) = types {
@@ -222,15 +223,16 @@ fn parse_numeric_input(s: &str) -> Result<Vec<u8>, String> {
         format!("numeric input must be type::value (e.g. u64::123456), got: {s}")
     })?;
     let ft = parse_type(type_str)?;
-    encode_fields(&[ft], &[val_str.to_string()])
+    encode_fields(&[ft], &serde_json::json!([val_str]))
 }
 
-fn get_encode_fields(args: &EncodeArgs) -> Result<(Vec<FieldType>, Vec<String>), String> {
+/// Returns `(types, values_json_array)`. Skip fields have no value slots.
+fn get_encode_fields(args: &EncodeArgs) -> Result<(Vec<FieldType>, Value), String> {
     if let Some(fj) = &args.fields_json {
         if args.stdin_values {
             return Err("--fields-json and --stdin-values are mutually exclusive".into());
         }
-        let v: serde_json::Value =
+        let v: Value =
             serde_json::from_str(fj).map_err(|e| format!("invalid fields JSON: {e}"))?;
         return config::parse_json_fields(&v);
     }
@@ -246,20 +248,16 @@ fn get_encode_fields(args: &EncodeArgs) -> Result<(Vec<FieldType>, Vec<String>),
         return Ok((types, values));
     }
     let values = if let Some(vj) = &args.values_json {
-        let v: serde_json::Value =
+        let v: Value =
             serde_json::from_str(vj).map_err(|e| format!("invalid values JSON: {e}"))?;
-        v.as_array()
-            .ok_or("values JSON must be an array")?
-            .iter()
-            .enumerate()
-            .map(|(i, x)| {
-                x.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| format!("values[{i}] must be a string"))
-            })
-            .collect::<Result<Vec<_>, _>>()?
+        if !v.is_array() {
+            return Err("values JSON must be an array".into());
+        }
+        v
     } else if let Some(vs) = &args.values {
-        vs.split(',').map(|s| s.to_string()).collect()
+        // Flat comma-separated strings; each becomes a JSON string value.
+        let arr: Vec<Value> = vs.split(',').map(|s| Value::String(s.to_string())).collect();
+        Value::Array(arr)
     } else {
         return Err(
             "no values provided (use -v, --values-json, -f, --fields-json, or --stdin-values)"
@@ -269,7 +267,7 @@ fn get_encode_fields(args: &EncodeArgs) -> Result<(Vec<FieldType>, Vec<String>),
     Ok((types, values))
 }
 
-fn parse_merged_fields(s: &str) -> Result<(Vec<FieldType>, Vec<String>), String> {
+fn parse_merged_fields(s: &str) -> Result<(Vec<FieldType>, Value), String> {
     let mut types = Vec::new();
     let mut values = Vec::new();
     for (i, part) in s.split(',').enumerate() {
@@ -277,35 +275,34 @@ fn parse_merged_fields(s: &str) -> Result<(Vec<FieldType>, Vec<String>), String>
             format!("field {i}: expected type::value, got: '{part}'")
         })?;
         types.push(parse_type(type_str).map_err(|e| format!("field {i}: {e}"))?);
-        values.push(val_str.to_string());
+        values.push(Value::String(val_str.to_string()));
     }
-    Ok((types, values))
+    Ok((types, Value::Array(values)))
 }
 
-fn read_stdin_values(format: &str, delimiter: Option<&str>) -> Result<Vec<String>, String> {
+fn read_stdin_values(format: &str, delimiter: Option<&str>) -> Result<Value, String> {
     let mut input = String::new();
     io::stdin()
         .read_to_string(&mut input)
         .map_err(|e| format!("error reading stdin: {e}"))?;
     match format {
         "json" => {
-            let v: serde_json::Value = serde_json::from_str(input.trim())
+            let v: Value = serde_json::from_str(input.trim())
                 .map_err(|e| format!("invalid JSON from stdin: {e}"))?;
-            v.as_array()
-                .ok_or("stdin JSON must be an array")?
-                .iter()
-                .enumerate()
-                .map(|(i, x)| {
-                    x.as_str()
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| format!("stdin values[{i}] must be a string"))
-                })
-                .collect()
+            if !v.is_array() {
+                return Err("stdin JSON must be an array".into());
+            }
+            Ok(v)
         }
         "delimited" => {
             let raw = delimiter.unwrap_or(",");
             let delim = raw.replace("\\n", "\n").replace("\\t", "\t");
-            Ok(input.trim().split(delim.as_str()).map(|s| s.to_string()).collect())
+            let arr: Vec<Value> = input
+                .trim()
+                .split(delim.as_str())
+                .map(|s| Value::String(s.to_string()))
+                .collect();
+            Ok(Value::Array(arr))
         }
         _ => Err(format!("unknown stdin format: '{format}'. Valid: delimited, json")),
     }
@@ -313,28 +310,51 @@ fn read_stdin_values(format: &str, delimiter: Option<&str>) -> Result<Vec<String
 
 // -- Output formatting
 
+/// Convert a decoded `serde_json::Value` to a display string for delimited output.
+///
+/// Groups (arrays) are rendered as `[v1,v2,...]` inline.
+fn json_value_to_display(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Array(arr) => {
+            let inner = arr.iter().map(json_value_to_display).collect::<Vec<_>>().join(",");
+            format!("[{inner}]")
+        }
+        Value::Null => String::new(),
+        Value::Object(_) => v.to_string(),
+    }
+}
+
 fn format_decode_output(
-    results: &[DecodeResult],
+    result: &Value,
+    types: &[FieldType],
     output: &str,
     delimiter: &str,
 ) -> Result<String, String> {
+    let values = result.as_array().ok_or("decode result must be an array")?;
     match output {
-        "delimited" => Ok(results
-            .iter()
-            .map(|r| r.value.clone())
-            .collect::<Vec<_>>()
-            .join(delimiter)),
-        "json" => {
-            let vals: Vec<serde_json::Value> = results
-                .iter()
-                .map(|r| serde_json::Value::String(r.value.clone()))
-                .collect();
-            serde_json::to_string(&vals).map_err(|e| e.to_string())
+        "delimited" => {
+            let parts: Vec<String> = values.iter().map(json_value_to_display).collect();
+            Ok(parts.join(delimiter))
         }
+        "json" => serde_json::to_string(result).map_err(|e| e.to_string()),
         "json-detailed" => {
-            let objs: Vec<serde_json::Value> = results
+            // Zip non-skip types with values for type annotations.
+            let non_skip: Vec<&FieldType> =
+                types.iter().filter(|t| !matches!(t, FieldType::Skip(_))).collect();
+            if non_skip.len() != values.len() {
+                return Err(format!(
+                    "type/value count mismatch in json-detailed: {} types vs {} values",
+                    non_skip.len(),
+                    values.len()
+                ));
+            }
+            let objs: Vec<Value> = non_skip
                 .iter()
-                .map(|r| serde_json::json!({ "type": r.type_name, "value": r.value }))
+                .zip(values.iter())
+                .map(|(ft, val)| serde_json::json!({ "type": ft.type_name(), "value": val }))
                 .collect();
             serde_json::to_string(&objs).map_err(|e| e.to_string())
         }
@@ -403,7 +423,7 @@ fn dump_decode_json(args: &DecodeArgs, types: Option<&[FieldType]>) {
         ..Default::default()
     };
     if let Some(ts) = types {
-        cfg.types = Some(ts.iter().map(|t| t.type_name()).collect());
+        cfg.types = Some(ts.iter().map(|t| t.to_json_type()).collect());
     }
     if let Some(h) = &args.hex { cfg.hex_data = Some(h.clone()); }
     if let Some(n) = &args.numeric { cfg.numeric = Some(n.clone()); }
@@ -411,17 +431,19 @@ fn dump_decode_json(args: &DecodeArgs, types: Option<&[FieldType]>) {
     println!("{}", cfg.to_json_pretty());
 }
 
-fn dump_encode_json(args: &EncodeArgs, types: Option<&[FieldType]>, values: Option<&[String]>) {
+fn dump_encode_json(args: &EncodeArgs, types: Option<&[FieldType]>, values: Option<&Value>) {
     let mut cfg = Config {
         mode: Some("encode".into()),
         encode_output: Some(args.output.clone()),
         ..Default::default()
     };
     if let Some(ts) = types {
-        cfg.types = Some(ts.iter().map(|t| t.type_name()).collect());
+        cfg.types = Some(ts.iter().map(|t| t.to_json_type()).collect());
     }
     if let Some(vs) = values {
-        cfg.values = Some(vs.to_vec());
+        if let Some(arr) = vs.as_array() {
+            cfg.values = Some(arr.clone());
+        }
     }
     if args.stdin_values {
         cfg.stdin_values = Some(true);
@@ -441,9 +463,9 @@ fn exec_decode(da: &DecodeArgs, dump_json: bool) -> Result<(), String> {
     }
     let types = types_result?;
     let data = get_input_bytes(da)?;
-    let results = decode_fields(&types, &data)?;
+    let result = decode_fields(&types, &data)?;
     let delimiter = da.delimiter.replace("\\n", "\n").replace("\\t", "\t").replace("\\0", "\0");
-    let out = format_decode_output(&results, &da.output, &delimiter)?;
+    let out = format_decode_output(&result, &types, &da.output, &delimiter)?;
     println!("{out}");
     Ok(())
 }
@@ -454,7 +476,7 @@ fn exec_encode(ea: &EncodeArgs, dump_json: bool) -> Result<(), String> {
         let (types, values) = fields
             .map(|(t, v)| (Some(t), Some(v)))
             .unwrap_or((None, None));
-        dump_encode_json(ea, types.as_deref(), values.as_deref());
+        dump_encode_json(ea, types.as_deref(), values.as_ref());
         return Ok(());
     }
     let (types, values) = get_encode_fields(ea)?;
@@ -474,11 +496,11 @@ Integers (little-endian by default; prefix > for big-endian, < for explicit LE):
   i8  i16  i32  i64  i128     Signed integer
 
   Endian examples: u32 (LE), >u32 (BE), <u32 (explicit LE)
-  Values: decimal (42, -7) or 0x-prefixed hex (0xFF)
+  Values: decimal (42, -7), 0x-prefixed hex (0xFF), or JSON number
 
 Boolean:
   bool                         1 byte; 0=false, non-zero=true
-  Values: true/false, 1/0, yes/no
+  Values: true/false, 1/0, yes/no, or JSON boolean
 
 Bit fields (packed MSB-first within one byte; must not cross byte boundaries):
   b1 b2 b3 b4 b5 b6 b7        N-bit field
@@ -488,18 +510,30 @@ Strings:
   sN                           Fixed N-byte UTF-8 field, zero-padded (e.g. s8)
   s                            Unbounded UTF-8, consumes rest of input
   p                            Pascal string: 1-byte length + data (max 255 bytes)
-  Values: UTF-8 text
+  Values: UTF-8 text string
 
 Raw bytes:
-  xN                           Exactly N bytes, hex-encoded (e.g. x4::DEADBEEF)
+  xN                           Exactly N bytes, hex-encoded (e.g. x4)
   x                            Unbounded raw bytes, consumes rest of input
   Values: even-length hex string (e.g. DEADBEEF or deadbeef)
 
+Skip:
+  zN                           Skip N bytes; writes zeros (encode), discards (decode)
+  (no value slot — transparent in the values array)
+
+Groups:
+  [t1,t2,...]                  Encode/decode sub-fields as a JSON array (recursive)
+  e.g. [i8,i8] or [i8,[i8,i8]]
+  --types-json supports nested arrays: [\"i32\", [\"i8\", \"i8\"], \"i16\"]
+  Values: JSON array (typed or string elements)
+
 Notes:
-  - All integers are big-endian when prefixed with >, little-endian otherwise.
+  - All integers default to little-endian; prefix with > for big-endian.
   - Bit fields in a contiguous run must total <= 8 bits (one byte).
-  - The merged field format (-f) uses commas as field separators;
-    string values containing commas require -v/--values-json instead.");
+  - Bit fields are not permitted inside groups.
+  - JSON output (-o json) uses typed values: numbers, booleans, strings, arrays.
+  - The merged field format (-f) uses commas as separators; groups require
+    --values-json or --fields-json instead.");
 }
 
 // -- Entry point

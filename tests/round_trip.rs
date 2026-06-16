@@ -1,19 +1,24 @@
+use serde_json::Value;
 use struct_cli::{decode_fields, encode_fields, parse_hex, parse_type, parse_type_list, Endian, FieldType};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Encode using string values (wrapped as JSON strings).
 fn enc(types_str: &str, values: &[&str]) -> Vec<u8> {
     let types = parse_type_list(types_str).unwrap();
-    let values: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-    encode_fields(&types, &values).unwrap()
+    let arr: Vec<Value> = values.iter().map(|s| Value::String(s.to_string())).collect();
+    encode_fields(&types, &Value::Array(arr)).unwrap()
 }
 
+/// Decode and return each field value as a string for easy comparison.
 fn dec(types_str: &str, data: &[u8]) -> Vec<String> {
     let types = parse_type_list(types_str).unwrap();
-    decode_fields(&types, data)
+    let result = decode_fields(&types, data).unwrap();
+    result
+        .as_array()
         .unwrap()
-        .into_iter()
-        .map(|r| r.value)
+        .iter()
+        .map(value_to_string)
         .collect()
 }
 
@@ -24,13 +29,26 @@ fn round_trip(types_str: &str, values: &[&str]) -> Vec<String> {
 
 fn enc_err(types_str: &str, values: &[&str]) -> String {
     let types = parse_type_list(types_str).unwrap();
-    let values: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-    encode_fields(&types, &values).unwrap_err()
+    let arr: Vec<Value> = values.iter().map(|s| Value::String(s.to_string())).collect();
+    encode_fields(&types, &Value::Array(arr)).unwrap_err()
 }
 
 fn dec_err(types_str: &str, data: &[u8]) -> String {
     let types = parse_type_list(types_str).unwrap();
     decode_fields(&types, data).unwrap_err()
+}
+
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Array(arr) => {
+            let inner = arr.iter().map(value_to_string).collect::<Vec<_>>().join(",");
+            format!("[{inner}]")
+        }
+        _ => v.to_string(),
+    }
 }
 
 // ── Type parsing ──────────────────────────────────────────────────────────────
@@ -93,10 +111,37 @@ fn parse_hex_types() {
 }
 
 #[test]
+fn parse_skip_type() {
+    assert_eq!(parse_type("z1").unwrap(), FieldType::Skip(1));
+    assert_eq!(parse_type("z4").unwrap(), FieldType::Skip(4));
+    assert_eq!(parse_type("z100").unwrap(), FieldType::Skip(100));
+    assert!(parse_type("z0").is_err());
+}
+
+#[test]
+fn parse_group_type() {
+    let types = parse_type_list("[i8,i8]").unwrap();
+    assert_eq!(types.len(), 1);
+    assert!(matches!(&types[0], FieldType::Group(inner) if inner.len() == 2));
+}
+
+#[test]
+fn parse_nested_group_type() {
+    let types = parse_type_list("i32,[i8,[i8,i8]],i16").unwrap();
+    assert_eq!(types.len(), 3);
+    if let FieldType::Group(outer) = &types[1] {
+        assert_eq!(outer.len(), 2);
+        assert!(matches!(&outer[1], FieldType::Group(inner) if inner.len() == 2));
+    } else {
+        panic!("expected Group");
+    }
+}
+
+#[test]
 fn parse_unknown_type_errors() {
-    assert!(parse_type("z8").is_err());
     assert!(parse_type("uint").is_err());
     assert!(parse_type("").is_err());
+    assert!(parse_type("z0").is_err()); // z0 is invalid (must be > 0)
 }
 
 #[test]
@@ -108,6 +153,7 @@ fn type_name_round_trips() {
         "bool", "b1", "b4", "b7",
         "s8", "s256", "s", "p",
         "x4", "x", "x16",
+        "z4", "z1",
     ];
     for s in cases {
         let ft = parse_type(s).unwrap();
@@ -311,6 +357,25 @@ fn bool_byte_layout() {
 }
 
 #[test]
+fn bool_typed_json_input() {
+    let types = parse_type_list("bool").unwrap();
+    // JSON boolean input
+    let bytes = encode_fields(&types, &serde_json::json!([true])).unwrap();
+    assert_eq!(bytes, vec![1]);
+    let bytes = encode_fields(&types, &serde_json::json!([false])).unwrap();
+    assert_eq!(bytes, vec![0]);
+}
+
+#[test]
+fn bool_typed_json_output() {
+    let types = parse_type_list("bool").unwrap();
+    let result = decode_fields(&types, &[1]).unwrap();
+    assert_eq!(result, serde_json::json!([true]));
+    let result = decode_fields(&types, &[0]).unwrap();
+    assert_eq!(result, serde_json::json!([false]));
+}
+
+#[test]
 fn bool_invalid_value() {
     assert!(enc_err("bool", &["maybe"]).contains("invalid bool"));
 }
@@ -508,6 +573,154 @@ fn hex_invalid_chars() {
     assert!(parse_hex("ZZZZ", "test").is_err());
 }
 
+// ── Skip fields ───────────────────────────────────────────────────────────────
+
+#[test]
+fn skip_transparent_in_values_array() {
+    // z2 has no value slot: only 2 values needed for [u8, z2, u8]
+    let types = parse_type_list("u8,z2,u8").unwrap();
+    let bytes = encode_fields(&types, &serde_json::json!([10, 20])).unwrap();
+    assert_eq!(bytes, vec![10, 0, 0, 20]);
+    let result = decode_fields(&types, &bytes).unwrap();
+    let arr = result.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "skip fields do not appear in output");
+    assert_eq!(arr[0], serde_json::json!(10));
+    assert_eq!(arr[1], serde_json::json!(20));
+}
+
+#[test]
+fn skip_writes_zeros_on_encode() {
+    // z4 only, empty values array
+    let types = parse_type_list("z4").unwrap();
+    let bytes = encode_fields(&types, &serde_json::json!([])).unwrap();
+    assert_eq!(bytes, vec![0, 0, 0, 0]);
+}
+
+#[test]
+fn skip_between_fields_round_trip() {
+    let types = parse_type_list("u8,z4,u16").unwrap();
+    let input = serde_json::json!([42, 1000]);
+    let bytes = encode_fields(&types, &input).unwrap();
+    assert_eq!(bytes.len(), 7); // 1 + 4 + 2
+    assert_eq!(bytes[0], 42);
+    assert_eq!(&bytes[1..5], &[0, 0, 0, 0]);
+    let result = decode_fields(&types, &bytes).unwrap();
+    assert_eq!(result, serde_json::json!([42, 1000]));
+}
+
+// ── Groups ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn group_encodes_as_json_array() {
+    let types = parse_type_list("[u8,u8],u8").unwrap();
+    let bytes = encode_fields(&types, &serde_json::json!([[1, 2], 3])).unwrap();
+    assert_eq!(bytes, vec![1, 2, 3]);
+}
+
+#[test]
+fn group_decodes_as_json_array() {
+    let types = parse_type_list("[u8,u8],u8").unwrap();
+    let result = decode_fields(&types, &[1, 2, 3]).unwrap();
+    assert_eq!(result, serde_json::json!([[1, 2], 3]));
+}
+
+#[test]
+fn group_round_trip() {
+    let types = parse_type_list("u8,[i8,i8],u8").unwrap();
+    let input = serde_json::json!([1, [-1, 2], 3]);
+    let bytes = encode_fields(&types, &input).unwrap();
+    let result = decode_fields(&types, &bytes).unwrap();
+    assert_eq!(result, input);
+}
+
+#[test]
+fn nested_group_round_trip() {
+    let types = parse_type_list("[u8,[u8,u8]]").unwrap();
+    let input = serde_json::json!([[1, [2, 3]]]);
+    let bytes = encode_fields(&types, &input).unwrap();
+    assert_eq!(bytes, vec![1, 2, 3]);
+    let result = decode_fields(&types, &bytes).unwrap();
+    assert_eq!(result, input);
+}
+
+#[test]
+fn group_with_skip_inside() {
+    let types = parse_type_list("[u8,z1,u8]").unwrap();
+    let input = serde_json::json!([[10, 20]]);
+    let bytes = encode_fields(&types, &input).unwrap();
+    assert_eq!(bytes, vec![10, 0, 20]);
+    let result = decode_fields(&types, &bytes).unwrap();
+    assert_eq!(result, input);
+}
+
+#[test]
+fn group_in_delimited_output() {
+    // groups render as [v1,v2,...] in delimited mode via the dec() helper
+    assert_eq!(dec("[u8,u8],u8", &[1, 2, 3]), vec!["[1,2]", "3"]);
+}
+
+#[test]
+fn group_types_json_nested_array() {
+    use struct_cli::config::parse_json_types;
+    // --types-json supports nested arrays for groups
+    let v = serde_json::json!(["i32", ["i8", "i8"], "i16"]);
+    let types = parse_json_types(&v).unwrap();
+    assert_eq!(types.len(), 3);
+    assert_eq!(types[0], FieldType::I32(Endian::Little));
+    assert!(matches!(&types[1], FieldType::Group(inner) if inner.len() == 2));
+    assert_eq!(types[2], FieldType::I16(Endian::Little));
+}
+
+#[test]
+fn group_bits_inside_not_allowed() {
+    // bit fields cannot be placed inside a group
+    let types = parse_type_list("[b4,b4]").unwrap();
+    assert!(encode_fields(&types, &serde_json::json!([["1010", "0101"]])).is_err());
+    assert!(decode_fields(&types, &[0xA5]).is_err());
+}
+
+// ── Typed JSON output ─────────────────────────────────────────────────────────
+
+#[test]
+fn decode_produces_typed_numbers() {
+    let types = parse_type_list("u8,i16,u32").unwrap();
+    let bytes = enc("u8,i16,u32", &["42", "-1", "100000"]);
+    let result = decode_fields(&types, &bytes).unwrap();
+    let arr = result.as_array().unwrap();
+    assert!(arr[0].is_number());
+    assert!(arr[1].is_number());
+    assert!(arr[2].is_number());
+    assert_eq!(arr[0], serde_json::json!(42));
+    assert_eq!(arr[1], serde_json::json!(-1));
+    assert_eq!(arr[2], serde_json::json!(100000));
+}
+
+#[test]
+fn decode_produces_typed_booleans() {
+    let types = parse_type_list("bool").unwrap();
+    let result = decode_fields(&types, &[1]).unwrap();
+    assert_eq!(result.as_array().unwrap()[0], serde_json::json!(true));
+}
+
+#[test]
+fn decode_u128_produces_string() {
+    // u128 exceeds serde_json's native integer range, serialised as string
+    let types = parse_type_list("u128").unwrap();
+    let bytes = enc("u128", &["1"]);
+    let result = decode_fields(&types, &bytes).unwrap();
+    assert!(result.as_array().unwrap()[0].is_string());
+    assert_eq!(result.as_array().unwrap()[0], serde_json::json!("1"));
+}
+
+#[test]
+fn encode_accepts_typed_json_values() {
+    let types = parse_type_list("u8,bool,i16").unwrap();
+    // typed JSON values (not strings)
+    let bytes = encode_fields(&types, &serde_json::json!([255, false, -100])).unwrap();
+    let result = decode_fields(&types, &bytes).unwrap();
+    assert_eq!(result, serde_json::json!([255, false, -100]));
+}
+
 // ── Mixed struct round-trips ──────────────────────────────────────────────────
 
 #[test]
@@ -573,11 +786,11 @@ fn hex_rest_at_end() {
 // ── Error cases ───────────────────────────────────────────────────────────────
 
 #[test]
-fn error_type_value_count_mismatch() {
+fn error_value_count_mismatch() {
     let types = parse_type_list("u8,u16").unwrap();
-    let values = vec!["42".to_string()];
-    let err = encode_fields(&types, &values).unwrap_err();
-    assert!(err.contains("type count"), "got: {err}");
+    // 2 fields, 1 value → error
+    let err = encode_fields(&types, &serde_json::json!(["42"])).unwrap_err();
+    assert!(err.contains("value count"), "got: {err}");
 }
 
 #[test]
@@ -708,14 +921,14 @@ fn hex_in_numeric_value() {
 }
 
 #[test]
-fn decode_result_type_names_match() {
-    let types = parse_type_list("u8,>u16,b4,s4").unwrap();
+fn decode_result_has_typed_values() {
     let bytes = enc("u8,>u16,b4,b4,s4", &["1", "2", "1010", "0101", "hi"]);
-    // use matching types for decode
-    let types2 = parse_type_list("u8,>u16,b4,b4,s4").unwrap();
-    let results = decode_fields(&types2, &bytes).unwrap();
-    assert_eq!(results[0].type_name, "u8");
-    assert_eq!(results[1].type_name, ">u16");
-    assert_eq!(results[2].type_name, "b4");
-    drop(types);
+    let types = parse_type_list("u8,>u16,b4,b4,s4").unwrap();
+    let result = decode_fields(&types, &bytes).unwrap();
+    let arr = result.as_array().unwrap();
+    assert_eq!(arr[0], serde_json::json!(1u8));
+    assert_eq!(arr[1], serde_json::json!(2u16));
+    assert_eq!(arr[2], serde_json::json!("1010")); // bits → string
+    assert_eq!(arr[3], serde_json::json!("0101"));
+    assert_eq!(arr[4], serde_json::json!("hi"));
 }

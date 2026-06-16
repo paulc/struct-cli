@@ -1,9 +1,7 @@
 use std::fmt;
+use serde_json::Value;
 
 /// Byte order for multi-byte numeric fields.
-///
-/// The default (undecorated type) is little-endian.
-/// Prefix a type with `>` for big-endian or `<` for explicit little-endian.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endian {
     Little,
@@ -52,13 +50,15 @@ pub enum FieldType {
     HexBytes(usize),
     /// Unbounded raw bytes that consume the remainder of the input.
     HexBytesRest,
+    /// Skip N bytes: writes zeros on encode, discards bytes on decode. No value slot.
+    Skip(usize),
+    /// A group of fields encoded/decoded as a unit, represented as a JSON array.
+    /// Bit fields are not permitted inside groups (byte-aligned only).
+    Group(Vec<FieldType>),
 }
 
 impl FieldType {
     /// Returns the canonical type name string.
-    ///
-    /// Big-endian numeric types are prefixed with `>`. Little-endian (default)
-    /// has no prefix.
     pub fn type_name(&self) -> String {
         match self {
             FieldType::U8 => "u8".into(),
@@ -78,6 +78,23 @@ impl FieldType {
             FieldType::PascalString => "p".into(),
             FieldType::HexBytes(n) => format!("x{n}"),
             FieldType::HexBytesRest => "x".into(),
+            FieldType::Skip(n) => format!("z{n}"),
+            FieldType::Group(fields) => {
+                let inner = fields.iter().map(|f| f.type_name()).collect::<Vec<_>>().join(",");
+                format!("[{inner}]")
+            }
+        }
+    }
+
+    /// Serialise as the JSON type descriptor used in `--types-json` and config files.
+    ///
+    /// Primitives and skip become a JSON string; groups become a nested JSON array.
+    pub fn to_json_type(&self) -> Value {
+        match self {
+            FieldType::Group(fields) => {
+                Value::Array(fields.iter().map(|f| f.to_json_type()).collect())
+            }
+            _ => Value::String(self.type_name()),
         }
     }
 
@@ -97,10 +114,6 @@ impl fmt::Display for FieldType {
 /// Numeric types may be prefixed with `>` (big-endian) or `<` (little-endian).
 /// The default (no prefix) is little-endian.
 ///
-/// # Errors
-///
-/// Returns an error string if the type is unrecognised or has an invalid parameter.
-///
 /// # Examples
 ///
 /// ```
@@ -110,6 +123,7 @@ impl fmt::Display for FieldType {
 /// assert_eq!(parse_type(">u16").unwrap(), FieldType::U16(Endian::Big));
 /// assert_eq!(parse_type("b4").unwrap(), FieldType::Bits(4));
 /// assert_eq!(parse_type("s8").unwrap(), FieldType::StringFixed(8));
+/// assert_eq!(parse_type("z4").unwrap(), FieldType::Skip(4));
 /// ```
 pub fn parse_type(s: &str) -> Result<FieldType, String> {
     let (endian, s) = if let Some(r) = s.strip_prefix('>') {
@@ -156,11 +170,60 @@ pub fn parse_type(s: &str) -> Result<FieldType, String> {
             }
             Ok(FieldType::HexBytes(n))
         }
+        _ if s.starts_with('z') => {
+            let n: usize = s[1..].parse().map_err(|_| format!("invalid skip type: {s}"))?;
+            if n == 0 {
+                return Err("skip byte count must be > 0".into());
+            }
+            Ok(FieldType::Skip(n))
+        }
         _ => Err(format!("unknown type: {s}")),
     }
 }
 
-/// Parse a comma-separated list of type descriptors.
+/// Split a type list string on commas, respecting `[...]` bracket nesting.
+fn split_type_tokens(s: &str) -> Result<Vec<&str>, String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                if depth == 0 {
+                    return Err("unexpected ']' in type list".into());
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                parts.push(s[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err("unclosed '[' in type list".into());
+    }
+    let last = s[start..].trim();
+    if !last.is_empty() || !parts.is_empty() {
+        parts.push(last);
+    }
+    Ok(parts)
+}
+
+fn parse_type_token(s: &str) -> Result<FieldType, String> {
+    if let Some(inner) = s.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        let fields = parse_type_list(inner)?;
+        Ok(FieldType::Group(fields))
+    } else {
+        parse_type(s)
+    }
+}
+
+/// Parse a comma-separated list of type descriptors, supporting `[...]` groups.
+///
+/// Groups can be nested: `[i8,[i8,i8]]`.
 ///
 /// # Examples
 ///
@@ -171,10 +234,90 @@ pub fn parse_type(s: &str) -> Result<FieldType, String> {
 /// assert_eq!(types[0], FieldType::U8);
 /// assert_eq!(types[1], FieldType::U16(Endian::Big));
 /// assert_eq!(types[2], FieldType::Bool);
+///
+/// // Groups produce a nested Vec
+/// let types = parse_type_list("i32,[i8,i8],i16").unwrap();
+/// assert_eq!(types.len(), 3);
+/// assert!(matches!(&types[1], FieldType::Group(inner) if inner.len() == 2));
+///
+/// // Skip type
+/// let types = parse_type_list("u8,z4,u8").unwrap();
+/// assert_eq!(types[1], FieldType::Skip(4));
 /// ```
 pub fn parse_type_list(s: &str) -> Result<Vec<FieldType>, String> {
-    s.split(',')
+    let tokens = split_type_tokens(s)?;
+    tokens
+        .iter()
         .enumerate()
-        .map(|(i, t)| parse_type(t.trim()).map_err(|e| format!("field {i}: {e}")))
+        .map(|(i, t)| parse_type_token(t).map_err(|e| format!("field {i}: {e}")))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_skip() {
+        assert_eq!(parse_type("z4").unwrap(), FieldType::Skip(4));
+        assert_eq!(parse_type("z1").unwrap(), FieldType::Skip(1));
+        assert!(parse_type("z0").is_err());
+    }
+
+    #[test]
+    fn test_parse_group() {
+        let types = parse_type_list("i32,[i8,i8],i16").unwrap();
+        assert_eq!(types.len(), 3);
+        assert_eq!(types[0], FieldType::I32(Endian::Little));
+        assert_eq!(types[2], FieldType::I16(Endian::Little));
+        if let FieldType::Group(inner) = &types[1] {
+            assert_eq!(inner.len(), 2);
+            assert_eq!(inner[0], FieldType::I8);
+            assert_eq!(inner[1], FieldType::I8);
+        } else {
+            panic!("expected Group");
+        }
+    }
+
+    #[test]
+    fn test_parse_nested_group() {
+        let types = parse_type_list("i32,[i8,[i8,i8]],i16").unwrap();
+        assert_eq!(types.len(), 3);
+        if let FieldType::Group(outer) = &types[1] {
+            assert_eq!(outer.len(), 2);
+            assert_eq!(outer[0], FieldType::I8);
+            if let FieldType::Group(inner) = &outer[1] {
+                assert_eq!(inner.len(), 2);
+                assert_eq!(inner[0], FieldType::I8);
+                assert_eq!(inner[1], FieldType::I8);
+            } else {
+                panic!("expected nested Group");
+            }
+        } else {
+            panic!("expected outer Group");
+        }
+    }
+
+    #[test]
+    fn test_type_name_group() {
+        let ft = FieldType::Group(vec![FieldType::I8, FieldType::U16(Endian::Big)]);
+        assert_eq!(ft.type_name(), "[i8,>u16]");
+    }
+
+    #[test]
+    fn test_to_json_type_group() {
+        let ft = FieldType::Group(vec![FieldType::I8, FieldType::I8]);
+        let jt = ft.to_json_type();
+        assert_eq!(jt, serde_json::json!(["i8", "i8"]));
+    }
+
+    #[test]
+    fn test_to_json_type_nested() {
+        let ft = FieldType::Group(vec![
+            FieldType::I8,
+            FieldType::Group(vec![FieldType::I8, FieldType::I8]),
+        ]);
+        let jt = ft.to_json_type();
+        assert_eq!(jt, serde_json::json!(["i8", ["i8", "i8"]]));
+    }
 }
