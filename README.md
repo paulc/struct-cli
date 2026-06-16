@@ -17,6 +17,8 @@ Run `struct-cli types` for a full reference. Summary:
 | `p` | Pascal string: 1-byte length prefix + data (max 255 bytes) |
 | `xN` | Exactly N raw bytes, hex-encoded |
 | `x` | Unbounded raw bytes, consumes rest of input |
+| `zN` | Skip N bytes — writes zeros (encode), discards bytes (decode); no value slot |
+| `[t1,t2,...]` | Group: encode/decode sub-fields as a JSON array (recursive) |
 
 ## Endianness
 
@@ -29,6 +31,60 @@ u16    little-endian (default)
 ```
 
 Endianness applies to multi-byte integer types. Single-byte types (`u8`, `i8`, `bool`) and non-numeric types are unaffected.
+
+## Skip Fields
+
+`zN` skips N bytes. On encode it writes N zero bytes; on decode it discards N bytes. It has **no value slot** — the values array length equals the number of non-skip fields.
+
+```sh
+# u8, skip 2 bytes, u8 — only 2 values needed
+struct-cli encode -t "u8,z2,u8" -v "10,20"
+# 0A000014
+
+struct-cli decode -t "u8,z2,u8" -x "0A000014" -o json
+# [10,20]
+```
+
+## Groups
+
+`[t1,t2,...]` groups encode/decode sub-fields as a nested JSON array. Groups can be nested.
+
+```sh
+struct-cli encode -t "u8,[i8,i8],u8" --values-json '[1,[-1,2],3]'
+# 01FF0203
+
+struct-cli decode -t "u8,[i8,i8],u8" -x "01FF0203" -o json
+# [1,[-1,2],3]
+
+# Nested groups
+struct-cli encode -t "[u8,[u8,u8]]" --values-json '[[1,[2,3]]]'
+# 010203
+```
+
+For `--types-json`, groups are expressed as nested JSON arrays:
+
+```sh
+struct-cli decode --types-json '["u8",["i8","i8"],"u8"]' -x "01FF0203" -o json
+# [1,[-1,2],3]
+```
+
+Bit fields are not permitted inside groups.
+
+## Typed JSON Values
+
+Decode output (`-o json`) uses native JSON types — numbers, booleans, strings — rather than strings for everything:
+
+```sh
+struct-cli decode -t "u8,bool,i16" -x "2A01FEFF" -o json
+# [42,true,-2]
+```
+
+Encode (`--values-json`, `--fields-json`, `--stdin-format json`) accepts typed JSON values:
+
+```sh
+struct-cli encode -t "u8,bool,i16" --values-json '[42,true,-2]'
+# 2A01FEFF
+```
 
 ## CLI Usage
 
@@ -57,8 +113,8 @@ Usage: struct-cli decode [-t <types>] [--types-json <types-json>] [-x <hex>] [-n
 Decode binary data into typed fields.
 
 Options:
-  -t, --types       struct definition: comma-separated types (e.g. u8,>u16,s8)
-  --types-json      struct definition as JSON array (e.g. '["u8",">u16","s8"]')
+  -t, --types       struct definition: comma-separated types (e.g. u8,>u16,s8 or u8,[i8,i8])
+  --types-json      struct definition as JSON array (e.g. '["u8",["i8","i8"]]')
   -x, --hex         hex-encoded input bytes on the command line
   -n, --numeric     numeric value with type prefix (e.g. u64::123456)
   --stdin-hex       read hex-encoded bytes from stdin instead of raw bytes
@@ -70,9 +126,9 @@ Options:
 Input priority: `-x` (hex string) > `-n` (numeric) > stdin (raw by default, hex with `--stdin-hex`).
 
 Output formats:
-- `delimited` - values separated by delimiter (default `,`)
-- `json` - JSON array of strings
-- `json-detailed` - JSON array of `{"type": ..., "value": ...}` objects
+- `delimited` — values separated by delimiter (default `,`); groups render as `[v1,v2,...]` inline
+- `json` — typed JSON array (numbers, booleans, strings, nested arrays for groups)
+- `json-detailed` — JSON array of `{"type": ..., "value": ...}` objects
 
 ### encode
 
@@ -84,10 +140,9 @@ Encode typed fields into binary data.
 Options:
   -t, --types       struct definition: comma-separated types
   --types-json      struct definition as JSON array
-  -v, --values      values as comma-separated list (positional match to types)
-  --values-json     values as JSON array of strings
-  -f, --fields      merged type::value pairs, comma-separated (e.g.
-                    u8::42,>u16::1000)
+  -v, --values      values as comma-separated list (positional match to non-skip types)
+  --values-json     values as JSON array (typed: numbers, booleans, nested arrays for groups)
+  -f, --fields      merged type::value pairs, comma-separated (e.g. u8::42,>u16::1000)
   --fields-json     merged fields as JSON: array of {"type":...,"value":...}
                     or {"types":[...],"values":[...]}
   --stdin-values    read values from stdin (requires -t/--types or --types-json)
@@ -99,12 +154,15 @@ Options:
 
 Input priority: `--fields-json` > `-f` (merged fields) > `-t`/`-v` (separate types+values).
 
-Note: the `-f` merged format uses commas to separate fields. String values containing commas require `-t`/`-v` or `--fields-json` instead.
+Notes:
+- Skip fields (`zN`) have no value slot — omit them from `-v`/`--values-json`.
+- Group fields consume one element in the values array, which must be a JSON array.
+- The `-f` merged format uses commas to separate fields; groups require `--values-json` or `--fields-json`.
 
 Output formats:
-- `hex` - uppercase hex to stdout (default)
-- `raw` - raw bytes to stdout
-- `u8`/`u16`/`u32`/`u64`/`u128` - interpret bytes as little-endian and print decimal
+- `hex` — uppercase hex to stdout (default)
+- `raw` — raw bytes to stdout
+- `u8`/`u16`/`u32`/`u64`/`u128` — interpret bytes as little-endian and print decimal
 
 ### types
 
@@ -120,13 +178,11 @@ Prints a reference of all supported field types and their value syntax.
 Usage: struct-cli run <config-file>
 ```
 
-Reads a JSON config file and executes the encode or decode operation it
-describes. The config must have a `mode` field set to `"encode"` or `"decode"`.
+Reads a JSON config file and executes the encode or decode operation it describes. The config must have a `mode` field set to `"encode"` or `"decode"`.
 
 ## JSON Config
 
-Generate a config file from any command with `--dump-json` (a root-level flag
-that must appear before the subcommand name):
+Generate a config file from any command with `--dump-json` (a root-level flag that must appear before the subcommand name):
 
 ```sh
 struct-cli --dump-json decode -t "u8,>u16,bool" -x "2A03E801" -o json > my-struct.json
@@ -156,13 +212,13 @@ struct-cli --dump-json run my-struct.json
 
 Config file keys: `mode`, `types`, `values`, `fields`, `stdin_values`, `stdin_format`, `stdin_delimiter`, `input`, `hex_data`, `numeric`, `output`, `delimiter`, `encode_output`.
 
-A full encode config example:
+In config files, `types` supports nested arrays for groups, and `values` accepts typed JSON values:
 
 ```json
 {
   "mode": "encode",
-  "types": ["u8", ">u16", "bool"],
-  "values": ["42", "1000", "true"],
+  "types": ["u8", ["i8", "i8"], "u8"],
+  "values": [1, [-1, 2], 3],
   "encode_output": "hex"
 }
 ```
@@ -185,6 +241,13 @@ struct-cli encode -t "u8,u16,bool" -v "42,1000,true"
 # 2AE80301
 ```
 
+Typed JSON values:
+
+```sh
+struct-cli encode -t "u8,u16,bool" --values-json '[42,1000,true]'
+# 2AE80301
+```
+
 Big-endian fields:
 
 ```sh
@@ -192,11 +255,22 @@ struct-cli encode -f "u8::42,>u16::1000,bool::true"
 # 2A03E801
 ```
 
-Mixed endianness:
+Skip fields (no value needed for `z2`):
 
 ```sh
-struct-cli encode -f "u16::1,>u16::1"
-# 01000100
+struct-cli encode -t "u8,z2,u8" -v "10,20"
+# 0A000014
+```
+
+Groups:
+
+```sh
+struct-cli encode -t "u8,[i8,i8],u8" --values-json '[1,[-1,2],3]'
+# 01FF0203
+
+# Groups with skip inside
+struct-cli encode -t "i8,[i8,i8],z1,x1" --values-json '[1,[2,3],"BB"]'
+# 01020300BB
 ```
 
 Values from stdin:
@@ -204,14 +278,14 @@ Values from stdin:
 ```sh
 echo "42,1000,true" | struct-cli encode -t "u8,u16,bool" --stdin-values
 printf "42\n1000\ntrue" | struct-cli encode -t "u8,u16,bool" --stdin-values --stdin-delimiter '\n'
-echo '["42","1000","true"]' | struct-cli encode -t "u8,u16,bool" --stdin-values --stdin-format json
+echo '[42,1000,true]' | struct-cli encode -t "u8,u16,bool" --stdin-values --stdin-format json
 ```
 
 JSON fields input:
 
 ```sh
-struct-cli encode --fields-json '[{"type":"u8","value":"42"},{"type":">u16","value":"1000"}]'
-struct-cli encode --fields-json '{"types":["u8",">u16"],"values":["42","1000"]}'
+struct-cli encode --fields-json '[{"type":"u8","value":42},{"type":">u16","value":1000}]'
+struct-cli encode --fields-json '{"types":["u8",">u16"],"values":[42,1000]}'
 ```
 
 Numeric output:
@@ -240,14 +314,31 @@ struct-cli decode -t "u8,u16,bool" -x "2AE80301" -d "|"
 # 42|1000|true
 ```
 
-JSON output:
+JSON output (typed values):
 
 ```sh
 struct-cli decode -t "u8,u16,bool" -x "2AE80301" -o json
-# ["42","1000","true"]
+# [42,1000,true]
 
 struct-cli decode -t "u8,u16,bool" -x "2AE80301" -o json-detailed
-# [{"type":"u8","value":"42"},{"type":"u16","value":"1000"},{"type":"bool","value":"true"}]
+# [{"type":"u8","value":42},{"type":"u16","value":1000},{"type":"bool","value":true}]
+```
+
+Skip fields:
+
+```sh
+struct-cli decode -t "u8,z2,u8" -x "0A000014" -o json
+# [10,20]
+```
+
+Groups:
+
+```sh
+struct-cli decode -t "u8,[i8,i8],u8" -x "01FF0203" -o json
+# [1,[-1,2],3]
+
+struct-cli decode --types-json '["u8",["i8","i8"],"u8"]' -x "01FF0203" -o json
+# [1,[-1,2],3]
 ```
 
 Hex from stdin:
@@ -329,23 +420,36 @@ Add to `Cargo.toml`:
 ```toml
 [dependencies]
 struct-cli = { path = "..." }
+serde_json = "1"
 ```
 
 Core functions:
 
 ```rust
-use struct_cli::{encode_fields, decode_fields, parse_type_list, DecodeResult};
+use struct_cli::{encode_fields, decode_fields, parse_type_list};
+use serde_json::Value;
 
-// Encode
+// Encode — values is a JSON array; accepts typed values or strings
 let types = parse_type_list("u8,>u16,bool").unwrap();
-let values = vec!["42".to_string(), "1000".to_string(), "true".to_string()];
+let values = serde_json::json!([42, 1000, true]);
 let bytes: Vec<u8> = encode_fields(&types, &values).unwrap();
 
-// Decode
-let results: Vec<DecodeResult> = decode_fields(&types, &bytes).unwrap();
-for r in &results {
-    println!("{}: {}", r.type_name, r.value);
-}
+// Decode — returns a typed JSON array
+let result: Value = decode_fields(&types, &bytes).unwrap();
+let arr = result.as_array().unwrap();
+// arr[0] = 42 (Number), arr[1] = 1000 (Number), arr[2] = true (Bool)
+
+// Groups
+let types = parse_type_list("u8,[i8,i8],u8").unwrap();
+let values = serde_json::json!([1, [-1, 2], 3]);
+let bytes = encode_fields(&types, &values).unwrap();
+let result = decode_fields(&types, &bytes).unwrap();
+// result = [1, [-1, 2], 3]
+
+// Skip fields have no value slot
+let types = parse_type_list("u8,z2,u8").unwrap();
+let bytes = encode_fields(&types, &serde_json::json!([10, 20])).unwrap();
+// bytes = [10, 0, 0, 20]
 ```
 
 See `cargo doc --open` for full API documentation.
