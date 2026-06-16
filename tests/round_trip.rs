@@ -409,18 +409,14 @@ fn bits_round_trip_all_widths() {
     for n in 1u8..=7 {
         let type_str = format!("b{n}");
         let max_val = (1u8 << n) - 1;
-        // all zeros
-        let zeros = "0".repeat(n as usize);
-        assert_eq!(round_trip(&type_str, &[&zeros]), vec![zeros.clone()]);
-        // all ones
-        let ones = "1".repeat(n as usize);
-        assert_eq!(round_trip(&type_str, &[&ones]), vec![ones.clone()]);
-        // max numeric value
+        // encode zero, decode gives integer 0
+        assert_eq!(round_trip(&type_str, &["0"]), vec!["0"]);
+        // encode max value (decimal), decode gives same integer string
         let val = max_val.to_string();
-        let result = round_trip(&type_str, &[&val]);
-        // decode gives binary string
-        let expected = format!("{max_val:0width$b}", width = n as usize);
-        assert_eq!(result, vec![expected]);
+        assert_eq!(round_trip(&type_str, &[&val]), vec![val.clone()]);
+        // encode binary string (e.g. "1111"), decode gives integer (e.g. "15")
+        let ones = "1".repeat(n as usize);
+        assert_eq!(round_trip(&type_str, &[&ones]), vec![val]);
     }
 }
 
@@ -444,7 +440,7 @@ fn bits_followed_by_byte_field() {
     // b4 + u8: bit byte then separate byte
     let bytes = enc("b4,b4,u8", &["1111", "0000", "42"]);
     assert_eq!(bytes, vec![0xF0, 42]);
-    assert_eq!(dec("b4,b4,u8", &bytes), vec!["1111", "0000", "42"]);
+    assert_eq!(dec("b4,b4,u8", &bytes), vec!["15", "0", "42"]);
 }
 
 // ── Fixed string ──────────────────────────────────────────────────────────────
@@ -759,7 +755,8 @@ fn mixed_with_bits_and_ints() {
     let types = "b4,b4,u8,u16";
     let values = ["1010", "0101", "255", "1000"];
     let result = round_trip(types, &values);
-    assert_eq!(result, vec!["1010", "0101", "255", "1000"]);
+    // "1010" and "0101" are binary strings: 10 and 5 respectively
+    assert_eq!(result, vec!["10", "5", "255", "1000"]);
 }
 
 #[test]
@@ -911,7 +908,7 @@ fn multiple_bit_field_bytes() {
     assert_eq!(bytes.len(), 2);
     assert_eq!(bytes[0], 0xF0);
     assert_eq!(bytes[1], 0b101_10101);
-    assert_eq!(dec(types, &bytes), vec!["1111", "0000", "101", "10101"]);
+    assert_eq!(dec(types, &bytes), vec!["15", "0", "5", "21"]);
 }
 
 #[test]
@@ -928,7 +925,23 @@ fn decode_result_has_typed_values() {
     let arr = result.as_array().unwrap();
     assert_eq!(arr[0], serde_json::json!(1u8));
     assert_eq!(arr[1], serde_json::json!(2u16));
-    assert_eq!(arr[2], serde_json::json!("1010")); // bits → string
-    assert_eq!(arr[3], serde_json::json!("0101"));
+    assert_eq!(arr[2], serde_json::json!(10u8)); // bits → integer (b4 "1010" = 10)
+    assert_eq!(arr[3], serde_json::json!(5u8));  // b4 "0101" = 5
     assert_eq!(arr[4], serde_json::json!("hi"));
+}
+
+#[test]
+fn binary_prefix_encode() {
+    // 0b prefix for bit fields
+    assert_eq!(enc("b4,b4", &["0b1010", "0b0101"]), vec![0xA5]);
+    assert_eq!(enc("b3,b2,b3", &["0b101", "0b11", "0b010"]), vec![0b101_11_010]);
+    // 0b prefix for integer types
+    assert_eq!(enc("u8", &["0b11111111"]), vec![0xFF]);
+    assert_eq!(enc("u16", &["0b0000000100000000"]), vec![0x00, 0x01]);
+}
+
+#[test]
+fn binary_prefix_round_trip() {
+    assert_eq!(round_trip("u8", &["0b10101010"]), vec!["170"]);
+    assert_eq!(round_trip("b4,b4", &["0b1010", "0b0101"]), vec!["10", "5"]);
 }

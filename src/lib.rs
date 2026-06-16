@@ -67,14 +67,14 @@
 //! ```
 //! use struct_cli::{encode_fields, decode_fields, parse_type_list};
 //!
-//! // b4 + b4 -> one byte
+//! // b4 + b4 -> one byte; encode accepts binary string, integer, or 0b prefix
 //! let types = parse_type_list("b4,b4").unwrap();
 //! let bytes = encode_fields(&types, &serde_json::json!(["1010", "0101"])).unwrap();
 //! assert_eq!(bytes, vec![0xA5]);
 //! let result = decode_fields(&types, &bytes).unwrap();
 //! let arr = result.as_array().unwrap();
-//! assert_eq!(arr[0], serde_json::json!("1010"));
-//! assert_eq!(arr[1], serde_json::json!("0101"));
+//! assert_eq!(arr[0], serde_json::json!(10u8)); // 0b1010 = 10
+//! assert_eq!(arr[1], serde_json::json!(5u8));  // 0b0101 = 5
 //! ```
 //!
 //! ## Strings

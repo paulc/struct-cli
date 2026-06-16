@@ -11,7 +11,7 @@ Run `struct-cli types` for a full reference. Summary:
 | `u8`/`u16`/`u32`/`u64`/`u128` | Unsigned integer |
 | `i8`/`i16`/`i32`/`i64`/`i128` | Signed integer |
 | `bool` | 1-byte boolean (0=false, non-zero=true) |
-| `b1`..`b7` | Bit field of N bits, packed MSB-first within one byte |
+| `b1`..`b7` | Bit field of N bits, packed MSB-first within one byte; decodes to integer |
 | `sN` | Fixed N-byte UTF-8 string, zero-padded |
 | `s` | Unbounded UTF-8 string, consumes rest of input |
 | `p` | Pascal string: 1-byte length prefix + data (max 255 bytes) |
@@ -365,18 +365,24 @@ struct-cli decode -t "u32" -n "u32::305419896"
 
 Bit fields are packed MSB-first within a byte. A contiguous run of bit fields must total 8 bits or fewer.
 
+Decode output is a plain integer. Encode accepts an integer, a `0b`-prefixed binary string, or an
+N-character binary string (all `0`/`1` chars, exactly as wide as the field).
+
 ```sh
 struct-cli encode -f "b4::1010,b4::0101"
 # A5
 
 struct-cli decode -t "b4,b4" -x "A5"
-# 1010,0101
+# 10,5
+
+struct-cli encode -f "b4::0b1010,b4::0b0101"
+# A5
 
 struct-cli encode -f "b3::101,b2::11,b3::010"
 # BA
 
 struct-cli decode -t "b3,b2,b3" -x "BA"
-# 101,11,010
+# 5,3,2
 ```
 
 ### Strings

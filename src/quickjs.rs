@@ -245,12 +245,7 @@ fn json_to_js_val<'js>(
                 .ok_or_else(|| js_error(ctx, "internal: group value not array"))?;
             json_array_to_js(ctx, arr_vals, inner)?.into_js(ctx)
         }
-        FieldType::Bits(_) => {
-            let s = val
-                .as_str()
-                .ok_or_else(|| js_error(ctx, "internal: bits value not a string"))?;
-            s.into_js(ctx)
-        }
+        FieldType::Bits(_) => json_generic_to_js(ctx, val),
         _ => json_generic_to_js(ctx, val),
     }
 }

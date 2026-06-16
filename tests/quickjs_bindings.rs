@@ -162,7 +162,8 @@ fn encode_decode_bit_fields() {
         let result: String = ctx
             .eval(r#"JSON.stringify(decodeFields("b4,b4", buf))"#)
             .unwrap();
-        assert_eq!(result, r#"["1010","0101"]"#);
+        // bit fields decode to integers: 0b1010=10, 0b0101=5
+        assert_eq!(result, "[10,5]");
     });
 }
 

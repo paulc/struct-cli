@@ -11,7 +11,7 @@ use crate::types::{Endian, FieldType};
 /// Values are accepted as typed JSON (numbers, booleans) or as strings:
 /// - Numeric: JSON number, or decimal/`0x`-prefixed hex string
 /// - Bool: JSON boolean, or `"true"`/`"false"`/`"1"`/`"0"`/`"yes"`/`"no"`
-/// - Bits: binary string matching the bit width (e.g. `"1010"` for `b4`), or number
+/// - Bits: integer, `0b`-prefixed binary string (e.g. `"0b1010"`), or N-char binary string (e.g. `"1010"` for `b4`)
 /// - StringFixed/StringRest/PascalString: JSON string
 /// - HexBytes: even-length hex string (e.g. `"DEADBEEF"`)
 /// - Group: JSON array of values for the inner fields
@@ -226,6 +226,8 @@ fn parse_bits(val: &str, n: u8, label: &str) -> Result<u8, String> {
 fn parse_uint(s: &str, label: &str) -> Result<u64, String> {
     if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u64::from_str_radix(h, 16).map_err(|e| format!("{label}: invalid hex: {e}"))
+    } else if let Some(b) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        u64::from_str_radix(b, 2).map_err(|e| format!("{label}: invalid binary: {e}"))
     } else {
         s.parse::<u64>().map_err(|e| format!("{label}: invalid integer: {e}"))
     }
@@ -234,6 +236,8 @@ fn parse_uint(s: &str, label: &str) -> Result<u64, String> {
 fn parse_sint(s: &str, label: &str) -> Result<i64, String> {
     if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         i64::from_str_radix(h, 16).map_err(|e| format!("{label}: invalid hex: {e}"))
+    } else if let Some(b) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        i64::from_str_radix(b, 2).map_err(|e| format!("{label}: invalid binary: {e}"))
     } else {
         s.parse::<i64>().map_err(|e| format!("{label}: invalid integer: {e}"))
     }
@@ -513,6 +517,24 @@ mod tests {
         assert_eq!(
             encode_fields(&types, &serde_json::json!([false])).unwrap(),
             vec![0]
+        );
+    }
+
+    #[test]
+    fn test_encode_binary_prefix() {
+        let types = parse_type_list("u8").unwrap();
+        assert_eq!(
+            encode_fields(&types, &serde_json::json!(["0b11111111"])).unwrap(),
+            vec![0xFF]
+        );
+        assert_eq!(
+            encode_fields(&types, &serde_json::json!(["0B10101010"])).unwrap(),
+            vec![0xAA]
+        );
+        let types = parse_type_list("b4,b4").unwrap();
+        assert_eq!(
+            encode_fields(&types, &serde_json::json!(["0b1010", "0b0101"])).unwrap(),
+            vec![0xA5]
         );
     }
 }

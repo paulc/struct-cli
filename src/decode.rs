@@ -68,7 +68,7 @@ pub fn decode_fields(types: &[FieldType], data: &[u8]) -> Result<Value, String> 
             let shift = 8 - bit_pos - n;
             let mask = (1u8 << n) - 1;
             let val = (bit_byte >> shift) & mask;
-            results.push(Value::String(format!("{val:0width$b}", width = n as usize)));
+            results.push(Value::from(val));
             bit_pos += n;
             if bit_pos == 8 {
                 in_bits = false;
