@@ -132,7 +132,11 @@ pub mod config;
 pub mod decode;
 pub mod encode;
 pub mod types;
+#[cfg(feature = "rquickjs")]
+pub mod quickjs;
 
 pub use decode::decode_fields;
 pub use encode::{encode_fields, parse_hex};
 pub use types::{parse_type, parse_type_list, Endian, FieldType};
+#[cfg(feature = "rquickjs")]
+pub use quickjs::register_struct;
