@@ -117,7 +117,7 @@
 //! ```
 //! use struct_cli::{encode_fields, decode_fields, parse_type_list};
 //!
-//! // z2 skips 2 bytes — no value slot in the array
+//! // z2 skips 2 bytes - no value slot in the array
 //! let types = parse_type_list("u8,z2,u8").unwrap();
 //! let bytes = encode_fields(&types, &serde_json::json!([10, 20])).unwrap();
 //! assert_eq!(bytes, vec![10, 0, 0, 20]);

@@ -519,7 +519,7 @@ Raw bytes:
 
 Skip:
   zN                           Skip N bytes; writes zeros (encode), discards (decode)
-  (no value slot — transparent in the values array)
+  (no value slot - transparent in the values array)
 
 Groups:
   [t1,t2,...]                  Encode/decode sub-fields as a JSON array (recursive)

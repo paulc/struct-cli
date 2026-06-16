@@ -249,7 +249,7 @@ fn decode_one(ft: &FieldType, data: &[u8], pos: usize, i: usize) -> Result<OneRe
     }
 }
 
-// Suppress unused import warning — Number is used implicitly via Value::from impls
+// Suppress unused import warning - Number is used implicitly via Value::from impls
 // but we may need it for future extensions.
 #[allow(dead_code)]
 fn _use_number(_: Number) {}

@@ -17,7 +17,7 @@ Run `struct-cli types` for a full reference. Summary:
 | `p` | Pascal string: 1-byte length prefix + data (max 255 bytes) |
 | `xN` | Exactly N raw bytes, hex-encoded |
 | `x` | Unbounded raw bytes, consumes rest of input |
-| `zN` | Skip N bytes — writes zeros (encode), discards bytes (decode); no value slot |
+| `zN` | Skip N bytes - writes zeros (encode), discards bytes (decode); no value slot |
 | `[t1,t2,...]` | Group: encode/decode sub-fields as a JSON array (recursive) |
 
 ## Endianness
@@ -34,10 +34,10 @@ Endianness applies to multi-byte integer types. Single-byte types (`u8`, `i8`, `
 
 ## Skip Fields
 
-`zN` skips N bytes. On encode it writes N zero bytes; on decode it discards N bytes. It has **no value slot** — the values array length equals the number of non-skip fields.
+`zN` skips N bytes. On encode it writes N zero bytes; on decode it discards N bytes. It has **no value slot** - the values array length equals the number of non-skip fields.
 
 ```sh
-# u8, skip 2 bytes, u8 — only 2 values needed
+# u8, skip 2 bytes, u8 - only 2 values needed
 struct-cli encode -t "u8,z2,u8" -v "10,20"
 # 0A000014
 
@@ -72,7 +72,7 @@ Bit fields are not permitted inside groups.
 
 ## Typed JSON Values
 
-Decode output (`-o json`) uses native JSON types — numbers, booleans, strings — rather than strings for everything:
+Decode output (`-o json`) uses native JSON types - numbers, booleans, strings - rather than strings for everything:
 
 ```sh
 struct-cli decode -t "u8,bool,i16" -x "2A01FEFF" -o json
@@ -126,9 +126,9 @@ Options:
 Input priority: `-x` (hex string) > `-n` (numeric) > stdin (raw by default, hex with `--stdin-hex`).
 
 Output formats:
-- `delimited` — values separated by delimiter (default `,`); groups render as `[v1,v2,...]` inline
-- `json` — typed JSON array (numbers, booleans, strings, nested arrays for groups)
-- `json-detailed` — JSON array of `{"type": ..., "value": ...}` objects
+- `delimited` - values separated by delimiter (default `,`); groups render as `[v1,v2,...]` inline
+- `json` - typed JSON array (numbers, booleans, strings, nested arrays for groups)
+- `json-detailed` - JSON array of `{"type": ..., "value": ...}` objects
 
 ### encode
 
@@ -155,14 +155,14 @@ Options:
 Input priority: `--fields-json` > `-f` (merged fields) > `-t`/`-v` (separate types+values).
 
 Notes:
-- Skip fields (`zN`) have no value slot — omit them from `-v`/`--values-json`.
+- Skip fields (`zN`) have no value slot - omit them from `-v`/`--values-json`.
 - Group fields consume one element in the values array, which must be a JSON array.
 - The `-f` merged format uses commas to separate fields; groups require `--values-json` or `--fields-json`.
 
 Output formats:
-- `hex` — uppercase hex to stdout (default)
-- `raw` — raw bytes to stdout
-- `u8`/`u16`/`u32`/`u64`/`u128` — interpret bytes as little-endian and print decimal
+- `hex` - uppercase hex to stdout (default)
+- `raw` - raw bytes to stdout
+- `u8`/`u16`/`u32`/`u64`/`u128` - interpret bytes as little-endian and print decimal
 
 ### types
 
@@ -429,12 +429,12 @@ Core functions:
 use struct_cli::{encode_fields, decode_fields, parse_type_list};
 use serde_json::Value;
 
-// Encode — values is a JSON array; accepts typed values or strings
+// Encode - values is a JSON array; accepts typed values or strings
 let types = parse_type_list("u8,>u16,bool").unwrap();
 let values = serde_json::json!([42, 1000, true]);
 let bytes: Vec<u8> = encode_fields(&types, &values).unwrap();
 
-// Decode — returns a typed JSON array
+// Decode - returns a typed JSON array
 let result: Value = decode_fields(&types, &bytes).unwrap();
 let arr = result.as_array().unwrap();
 // arr[0] = 42 (Number), arr[1] = 1000 (Number), arr[2] = true (Bool)
